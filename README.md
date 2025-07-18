@@ -12,7 +12,7 @@ Please use it with userscript:
 
 [![play-with-mpv][badges-play-with-mpv]][play-with-mpv-enhanced]
 
-*Note: This mod is compatible with the [Play with mpv Enhanced](https://greasyfork.org/en/scripts/542145-play-with-mpv-enhanced) userscript. The original Play with mpv userscript is not compatible.*
+*Note: This mod is compatible with the [Play with mpv Enhanced](https://greasyfork.org/en/scripts/542145-play-with-mpv-enhanced) userscript. The original Play with mpv userscript is not compatible with queueing abilities.*
 
 ## Protocol
 
