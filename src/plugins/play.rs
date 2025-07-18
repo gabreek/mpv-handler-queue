@@ -16,7 +16,8 @@ const PREFIX_YT_PATH: &str = "--script-opts=ytdl_hook-ytdl_path=";
 /// Execute player with given options
 pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
     // Auto enqueue if mpv is already running
-    if let Some(socket_path) = &config.socket {
+    if proto.enqueue == Some(true) {
+        if let Some(socket_path) = &config.socket {
         eprintln!("Attempting to connect to socket: {}", socket_path);
         if let Ok(mut stream) = UnixStream::connect(socket_path) {
             let command = json!({
@@ -30,6 +31,7 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
             eprintln!("Socket connection failed. Launching new instance.");
         }
     }
+}
 
     // Fallback to new instance
     let mut options: Vec<&str> = Vec::new();
@@ -126,7 +128,13 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
         command = std::process::Command::new(crate::config::default_mpv()?);
     }
 
-    command.args(&options).arg("--").arg(&proto.url);
+    let mut final_options: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+    if proto.enqueue == Some(true) {
+        if let Some(socket_path) = &config.socket {
+            final_options.push(format!("--input-ipc-server={}", socket_path));
+        }
+    }
+    command.args(&final_options).arg("--").arg(&proto.url);
 
     // Set HTTP(S) proxy environment variables
     if let Some(proxy) = &config.proxy {

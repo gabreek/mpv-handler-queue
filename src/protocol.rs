@@ -44,6 +44,7 @@ pub struct Protocol<'a> {
     pub v_title: Option<String>,
     pub subfile: Option<String>,
     pub startat: Option<&'a str>,
+    pub enqueue: Option<bool>,
 }
 
 impl<'a> Protocol<'a> {
@@ -59,6 +60,7 @@ impl<'a> Protocol<'a> {
         let mut v_title: Option<String> = None;
         let mut subfile: Option<String> = None;
         let mut startat: Option<&'a str> = None;
+        let mut enqueue: Option<bool> = None;
 
         let mut i: usize;
 
@@ -112,6 +114,7 @@ impl<'a> Protocol<'a> {
                     "v_title" => v_title = Some(decode_txt(v)?),
                     "subfile" => subfile = Some(decode_url(v)?),
                     "startat" => startat = Some(v),
+                    "enqueue" => enqueue = Some(v.parse::<bool>().map_err(|_| Error::IncorrectProtocol(arg.to_string()))?),
                     _ => {}
                 };
             }
@@ -128,6 +131,7 @@ impl<'a> Protocol<'a> {
             v_title,
             subfile,
             startat,
+            enqueue,
         })
     }
 }
