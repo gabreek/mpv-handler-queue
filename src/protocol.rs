@@ -46,19 +46,19 @@ pub struct Protocol<'a> {
     pub startat: Option<&'a str>,
 }
 
-impl Protocol<'_> {
+impl<'a> Protocol<'a> {
     /// Parse the given argument and returns `Protocol`
-    pub fn parse(arg: &str) -> Result<Protocol, Error> {
+    pub fn parse(arg: &'a str) -> Result<Protocol<'a>, Error> {
         let scheme;
         let plugin;
         let url;
         let mut cookies: Option<&str> = None;
         let mut profile: Option<&str> = None;
         let mut quality: Option<&str> = None;
-        let mut v_codec: Option<&str> = None;
+        let mut v_codec: Option<&'a str> = None;
         let mut v_title: Option<String> = None;
         let mut subfile: Option<String> = None;
-        let mut startat: Option<&str> = None;
+        let mut startat: Option<&'a str> = None;
 
         let mut i: usize;
 

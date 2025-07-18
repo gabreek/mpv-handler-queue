@@ -12,6 +12,7 @@ pub struct Config {
     pub mpv: Option<String>,
     pub ytdl: Option<String>,
     pub proxy: Option<String>,
+    pub socket: Option<String>,
 }
 
 impl Config {
@@ -31,6 +32,10 @@ impl Config {
                 }
                 if let Some(ytdl) = config.ytdl {
                     config.ytdl = Some(realpath(ytdl)?);
+                }
+
+                if config.socket.is_none() {
+                    config.socket = Some(default_socket());
                 }
 
                 return Ok(config);
@@ -73,12 +78,21 @@ pub fn default_mpv() -> Result<String, Error> {
     return realpath("mpv.com");
 }
 
+/// The default value of `Config.socket`
+pub fn default_socket() -> String {
+    #[cfg(unix)]
+    return "/tmp/mpvsocket".to_string();
+    #[cfg(windows)]
+    return r"\\.\pipe\mpvsocket".to_string();
+}
+
 /// The defalut value of `Config`
 fn default_config() -> Config {
     Config {
         mpv: None,
         ytdl: None,
         proxy: None,
+        socket: Some(default_socket()),
     }
 }
 
@@ -117,6 +131,7 @@ fn test_config_parse() {
             mpv = "/usr/bin/mpv"
             ytdl = "/usr/bin/yt-dlp"
             proxy = "http://example.com:8080"
+            socket = "/tmp/mpv"
         "#,
     )
     .unwrap();
@@ -124,6 +139,7 @@ fn test_config_parse() {
     assert_eq!(config.mpv, Some("/usr/bin/mpv".to_string()));
     assert_eq!(config.ytdl, Some("/usr/bin/yt-dlp".to_string()));
     assert_eq!(config.proxy, Some("http://example.com:8080".to_string()));
+    assert_eq!(config.socket, Some("/tmp/mpv".to_string()));
 
     // Unexpected values
     let config: Config = toml::from_str(
@@ -139,4 +155,5 @@ fn test_config_parse() {
     assert_eq!(config.mpv, None);
     assert_eq!(config.ytdl, None);
     assert_eq!(config.proxy, None);
+    assert_eq!(config.socket, None);
 }

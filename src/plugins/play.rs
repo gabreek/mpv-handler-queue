@@ -1,6 +1,9 @@
 use crate::config::Config;
 use crate::error::Error;
 use crate::protocol::Protocol;
+use serde_json::json;
+use std::io::prelude::*;
+use std::os::unix::net::UnixStream;
 
 const PREFIX_COOKIES: &str = "--ytdl-raw-options-append=cookies=";
 const PREFIX_PROFILE: &str = "--profile=";
@@ -12,9 +15,29 @@ const PREFIX_YT_PATH: &str = "--script-opts=ytdl_hook-ytdl_path=";
 
 /// Execute player with given options
 pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
+    // Auto enqueue if mpv is already running
+    if let Some(socket_path) = &config.socket {
+        eprintln!("Attempting to connect to socket: {}", socket_path);
+        if let Ok(mut stream) = UnixStream::connect(socket_path) {
+            let command = json!({
+                "command": ["loadfile", &proto.url, "append-play"],
+            });
+            let command_str = command.to_string() + "\n";
+            stream.write_all(command_str.as_bytes())?;
+            println!("Enqueued: {}", proto.url);
+            return Ok(());
+        } else {
+            eprintln!("Socket connection failed. Launching new instance.");
+        }
+    }
+
+    // Fallback to new instance
     let mut options: Vec<&str> = Vec::new();
     let option_cookies: String;
     let option_profile: String;
+
+
+
     let option_formats: String;
     let option_v_title: String;
     let option_subfile: String;
@@ -104,15 +127,6 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
     }
 
     command.args(&options).arg("--").arg(&proto.url);
-
-    // Hide console window on Windows if not in debug mode
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        if &proto.scheme == &crate::protocol::Schemes::Mpv && !cfg!(debug_assertions) {
-            command.creation_flags(0x08000000);
-        }
-    }
 
     // Set HTTP(S) proxy environment variables
     if let Some(proxy) = &config.proxy {
