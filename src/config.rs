@@ -96,6 +96,30 @@ fn default_config() -> Config {
     }
 }
 
+/// Find and read `ytdl-format` from `mpv.conf`
+pub fn get_ytdl_format_from_mpv_conf() -> Option<String> {
+    // Get mpv config directory
+    let mut path = dirs::config_dir()?;
+    path.push("mpv/mpv.conf");
+
+    if !path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(path).ok()?;
+
+    // Find `ytdl-format` option
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("ytdl-format=") {
+            let value = line.split_at("ytdl-format=".len()).1.trim();
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
 fn realpath<T: AsRef<std::ffi::OsStr>>(path: T) -> Result<String, Error> {
     let path = std::path::PathBuf::from(&path);
 

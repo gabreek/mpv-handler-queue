@@ -22,4 +22,6 @@ pub enum Error {
     FromTomlError(#[from] toml::de::Error),
     #[error("Failed to decode ({0})")]
     FromIoError(#[from] std::io::Error),
+    #[error("Socket connection failed")]
+    SocketConnectionFailed,
 }
