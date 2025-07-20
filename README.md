@@ -15,7 +15,7 @@ Please use it with userscript:
 ## Key Features
 
 ### Playlist Detection & Prefetching
-When a URL is passed, the handler uses `yt-dlp` to check if it's a playlist. If it is, it fetches the direct, playable URLs for the videos. This is a crucial pre-fetching step that avoids buffering, as mpv receives a direct link to the media, not just a webpage URL.
+When a URL is passed, the handler uses `yt-dlp` to fetch the direct, playable URLs for the video(s). For single videos, this prefetching occurs when enqueueing to an existing mpv instance. For playlists, it first detects if it's a playlist and then fetches the URLs for all selected items. This is a crucial pre-fetching step that allows mpv to utilize its `prefetch-playlist=yes` option for smoother playback, as mpv receives a direct link to the media, not just a webpage URL.
 
 ### Queueing via IPC Socket
 The handler then sends these direct URLs to the running mpv instance via its IPC socket, using the `loadfile append` command to build the queue seamlessly in the background.
@@ -167,7 +167,11 @@ To enable the queueing functionality and ensure the best experience, you need to
     *Note*: The `mpv-handler` uses `/tmp/mpvsocket` by default. Ensure this matches the path in your `mpv.conf`.
 
 
-**(Optional) Install Zenity**: For the interactive playlist dialog, you need to have `zenity` installed. If it's not found, the dialog is skipped, and the handler will default to loading the entire playlist.
+7.  **(Optional) Install `zenity` and `wmctrl`**: For the interactive playlist dialog and to ensure it stays on top, you need to have `zenity` and `wmctrl` installed. If `zenity` is not found, the dialog is skipped, and the handler will default to loading the entire playlist.
+    On Debian/Ubuntu-based systems, you can install them using:
+    ```bash
+    sudo apt-get install zenity wmctrl
+    ```
 
 [rfc-base64-url]: https://datatracker.ietf.org/doc/html/rfc4648#section-5
 [badges-aur-git]: https://img.shields.io/aur/version/mpv-handler-git?style=for-the-badge&logo=archlinux&label=mpv-handler-git

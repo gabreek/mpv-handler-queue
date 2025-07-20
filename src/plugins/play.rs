@@ -88,15 +88,28 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
                         "Playlist detected with {} entries.\nHow many items do you want to fetch? (0 for all)",
                         total_entries
                     );
-                    let confirmation_output = Command::new("zenity")
+                    let mut zenity_command = Command::new("zenity");
+                    zenity_command
                         .arg("--entry")
                         .arg("--text")
                         .arg(&dialog_text)
                         .arg("--entry-text")
                         .arg("0") // Default value is 0
                         .arg("--cancel-label=Play only the first video")
-                        .arg("--timeout=10")
-                        .output();
+                        .arg("--timeout=10");
+
+                    let confirmation_output = zenity_command.output();
+
+                    // Attempt to make Zenity window always on top using wmctrl
+                    if let Ok(child) = zenity_command.spawn() {
+                        let zenity_pid = child.id();
+                        // Give Zenity a moment to create its window
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("sh")
+                            .arg("-c")
+                            .arg(format!("wmctrl -l -p | grep \"{}\" | awk '{{print $1}}' | xargs -r wmctrl -i -r -b add,above", zenity_pid))
+                            .output();
+                    }
 
                     match confirmation_output {
                         Ok(output) => {
