@@ -1,5 +1,3 @@
-
-
 # mpv handler (queue mod)
 
 A protocol handler for **mpv**, written in Rust, with an added queueing modification.
@@ -13,6 +11,17 @@ Please use it with userscript:
 [![play-with-mpv][badges-play-with-mpv]][play-with-mpv-enhanced]
 
 *Note: This mod is compatible with the [Play with mpv Enhanced](https://greasyfork.org/en/scripts/542145-play-with-mpv-enhanced) userscript. The original Play with mpv userscript is not compatible with queueing abilities.*
+
+## Key Features
+
+### Playlist Detection & Prefetching
+When a URL is passed, the handler uses `yt-dlp` to check if it's a playlist. If it is, it fetches the direct, playable URLs for the videos. This is a crucial pre-fetching step that avoids buffering, as mpv receives a direct link to the media, not just a webpage URL.
+
+### Queueing via IPC Socket
+The handler then sends these direct URLs to the running mpv instance via its IPC socket, using the `loadfile append` command to build the queue seamlessly in the background.
+
+### Interactive Control
+To make it user-friendly, if a playlist is detected, the handler shows a `zenity` dialog asking the user how many videos to queue (with '0' for all). It has a 10-second timeout that defaults to queueing the entire playlist. The user can also choose to play only the first video, ignoring the rest of the playlist.
 
 ## Protocol
 
@@ -72,26 +81,43 @@ cargo build --release
 
 The compiled binary will be located at `target/release/mpv-handler`.
 
-## Configuration
+## Installation
 
-To enable the queueing functionality, you need to configure mpv to listen on a socket. This allows `mpv-handler` to communicate with a running mpv instance.
+After building from source, follow these steps to install `mpv-handler` on your Linux system:
 
-1.  **Create or edit your `mpv.conf` file**:
-    *   This file is usually located at `~/.config/mpv/mpv.conf`.
-
-2.  **Add the following line to `mpv.conf`**:
-
-    ```
-    input-ipc-server=/tmp/mpvsocket
+1.  **Copy the `mpv-handler` binary** to your local bin directory:
+    ```bash
+    cp target/release/mpv-handler ~/.local/bin/
     ```
 
-    *Note*: The `mpv-handler` uses `/tmp/mpvsocket` by default. Ensure this matches the path in your `mpv.conf`.
+2.  **Copy the desktop files** for application integration:
+    ```bash
+    cp share/linux/mpv-handler.desktop ~/.local/share/applications/
+    cp share/linux/mpv-handler-debug.desktop ~/.local/share/applications/
+    ```
 
-3.  **Optional `config.toml` for `mpv-handler`**:
-    You can also create a `config.toml` file for `mpv-handler` to specify paths for `mpv` and `yt-dlp`, or to configure a proxy. This file is located at:
+3.  **Set executable permission** for the binary:
+    ```bash
+    chmod +x ~/.local/bin/mpv-handler
+    ```
+
+4.  **Register xdg-mime** to associate the `mpv://` and `mpv-debug://` schemes with the handler:
+    ```bash
+    xdg-mime default mpv-handler.desktop x-scheme-handler/mpv
+    xdg-mime default mpv-handler-debug.desktop x-scheme-handler/mpv-debug
+    ```
+
+5.  **Add `~/.local/bin` to your environment variable PATH** (if not already present) to ensure the system can find the `mpv-handler` binary. You can add this line to your `~/.bashrc`, `~/.zshrc`, or equivalent shell configuration file:
+    ```bash
+    export PATH="$HOME/.local/bin:$PATH"
+    ```
+    After adding, remember to source your shell configuration file (e.g., `source ~/.bashrc`) or restart your terminal.
+
+6.  **(Optional) Configure `mpv-handler` with `config.toml`**:
+    You can copy the example `config.toml` to `~/.config/mpv-handler/config.toml` and configure paths for `mpv` and `yt-dlp`, or set a proxy. This file is located at:
     *   `~/.config/mpv-handler/config.toml`
 
-    Example `config.toml`:
+    Example `config.toml` (for `mpv-handler`):
 
     ```toml
     mpv = "/usr/bin/mpv"
@@ -108,6 +134,40 @@ To enable the queueing functionality, you need to configure mpv to listen on a s
     # Optional, Type: String
     # HTTP(S) proxy server address
     ```
+
+## Configuration
+
+To enable the queueing functionality and ensure the best experience, you need to configure mpv.
+
+1.  **Create or edit your `mpv.conf` file**:
+    *   This file is usually located at `~/.config/mpv/mpv.conf`.
+
+2.  **Add the following recommended settings to `mpv.conf`**:
+
+    ```
+    # --- IPC and Handler Configuration ---
+    # Enables the socket for the handler to communicate with mpv (required).
+    input-ipc-server=/tmp/mpvsocket
+
+    # --- YouTube/Streaming Quality ---
+    # The handler will read this format to pre-fetch the correct quality.
+    ytdl-format=bestvideo[height<=?1920][fps<=?30][vcodec^=avc]+bestaudio/best
+
+    # Ensures mpv's internal hook uses the correct yt-dlp binary
+    script-opts=ytdl_hook-ytdl_path=/usr/local/bin/yt-dlp
+
+    # --- Caching and Prefetching ---
+    # These options ensure smooth playback and minimize buffering for streamed content.
+    prefetch-playlist=yes
+    cache=yes
+    demuxer-readahead-secs=300
+    demuxer-max-bytes=500M
+    ```
+
+    *Note*: The `mpv-handler` uses `/tmp/mpvsocket` by default. Ensure this matches the path in your `mpv.conf`.
+
+
+**(Optional) Install Zenity**: For the interactive playlist dialog, you need to have `zenity` installed. If it's not found, the dialog is skipped, and the handler will default to loading the entire playlist.
 
 [rfc-base64-url]: https://datatracker.ietf.org/doc/html/rfc4648#section-5
 [badges-aur-git]: https://img.shields.io/aur/version/mpv-handler-git?style=for-the-badge&logo=archlinux&label=mpv-handler-git

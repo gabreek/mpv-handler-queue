@@ -2,11 +2,12 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::protocol::Protocol;
 use serde_json::json;
+use std::borrow::Cow;
+use std::fs;
 use std::io::prelude::*;
 use std::os::unix::net::UnixStream;
-use std::process::Command;
-use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 const PREFIX_COOKIES: &str = "--ytdl-raw-options-append=cookies=";
 const PREFIX_PROFILE: &str = "--profile=";
@@ -51,41 +52,94 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
     let ytdl_path = config.ytdl.as_deref().unwrap_or("yt-dlp");
     eprintln!("Using yt-dlp path: {}", ytdl_path);
 
+    // --- Playlist Detection ---
     let mut is_playlist = false;
     let mut playlist_entries: Vec<(String, String)> = Vec::new(); // (title, url)
 
-    // First, check if it's a playlist and get all entries
-    let playlist_check_output = Command::new(ytdl_path)
-        .arg("--flat-playlist")
-        .arg("--dump-json")
-        .arg(&proto.url)
-        .output();
+    let is_explicit_playlist = proto.url.contains("&list=");
 
-    if let Ok(output) = playlist_check_output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
-                    if let (Some(title), Some(url)) = (
-                        json_value["title"].as_str(),
-                        json_value["url"].as_str(),
-                    ) {
-                        if title != "[Deleted video]" && title != "[Private video]" {
-                            playlist_entries.push((title.to_string(), url.to_string()));
-                        } else {
-                            eprintln!("Skipping unavailable video: {}", title);
+    if is_explicit_playlist {
+        let playlist_check_output = Command::new(ytdl_path)
+            .arg("--flat-playlist")
+            .arg("--dump-json")
+            .arg(&proto.url)
+            .output();
+
+        if let Ok(output) = playlist_check_output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let (Some(title), Some(url)) = (
+                            json_value["title"].as_str(),
+                            json_value["url"].as_str(),
+                        ) {
+                            if title != "[Deleted video]" && title != "[Private video]" {
+                                playlist_entries.push((title.to_string(), url.to_string()));
+                            } else {
+                                eprintln!("Skipping unavailable video: {}", title);
+                            }
+                        }
+                    }
+                }
+                if playlist_entries.len() > 1 {
+                    let total_entries = playlist_entries.len();
+                    let dialog_text = format!(
+                        "Playlist detected with {} entries.\nHow many items do you want to fetch? (0 for all)",
+                        total_entries
+                    );
+                    let confirmation_output = Command::new("zenity")
+                        .arg("--entry")
+                        .arg("--text")
+                        .arg(&dialog_text)
+                        .arg("--entry-text")
+                        .arg("0") // Default value is 0
+                        .arg("--cancel-label=Play only the first video")
+                        .arg("--timeout=10")
+                        .output();
+
+                    match confirmation_output {
+                        Ok(output) => {
+                            match output.status.code() {
+                                Some(0) => { // OK clicked
+                                    let num_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    match num_str.parse::<usize>() {
+                                        Ok(0) => {
+                                            is_playlist = true;
+                                            eprintln!("User chose to fetch all {} playlist items.", total_entries);
+                                        }
+                                        Ok(num) => {
+                                            is_playlist = true;
+                                            playlist_entries.truncate(num);
+                                            eprintln!("User chose to fetch the first {} playlist items.", playlist_entries.len());
+                                        }
+                                        Err(_) => {
+                                            is_playlist = false;
+                                            eprintln!("Invalid input. Treating as a single video.");
+                                        }
+                                    }
+                                }
+                                Some(5) => { // Timeout
+                                    is_playlist = true;
+                                    eprintln!("Dialog timed out. Fetching all {} playlist items by default.", total_entries);
+                                }
+                                _ => { // Cancelled or other error
+                                    is_playlist = false;
+                                    eprintln!("User cancelled or dialog failed. Treating as a single video.");
+                                }
+                            }
+                        }
+                        Err(e) => { // Failed to execute zenity
+                            is_playlist = false;
+                            eprintln!("Zenity command failed: {}. Treating as a single video.", e);
                         }
                     }
                 }
             }
-            if playlist_entries.len() > 1 {
-                is_playlist = true;
-                eprintln!("Detected playlist with {} entries.", playlist_entries.len());
-            }
         }
     }
 
-    // --- Determine if we use existing socket or launch new instance ---
+    // --- Socket Check ---
     let mut use_existing_socket = false;
     if proto.enqueue == Some(true) {
         if let Some(socket_path) = &config.socket {
@@ -101,138 +155,167 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
     let ytdl_format = get_ytdl_format_from_mpv_conf()
         .unwrap_or_else(|| "bestvideo[height<=?1920][fps<=?30][vcodec^=avc]+bestaudio/best".to_string());
 
-    let mut initial_url_to_play: String;
-    let mut initial_title: String;
-    let mut initial_audio_url: Option<String> = None;
-
-    if !use_existing_socket && is_playlist {
-        // For a new mpv instance with a playlist, pass the original video URL to mpv
-        // and let its ytdl-hook handle the extraction, as requested.
-        eprintln!("Launching new instance for playlist, passing first video URL directly to mpv.");
-        initial_url_to_play = playlist_entries[0].1.clone();
-        initial_title = playlist_entries[0].0.clone();
-    } else {
-        // For all other cases (single video, or enqueuing to existing instance),
-        // we fetch the direct URL ourselves to have more control.
-        let url_for_ytdl_fetch = if is_playlist {
-            &playlist_entries[0].1
-        } else {
-            &proto.url
-        };
-
-        // Set initial values as a fallback
-        initial_url_to_play = url_for_ytdl_fetch.to_string();
-        initial_title = if is_playlist { playlist_entries[0].0.clone() } else { proto.url.clone() };
-
-        eprintln!("Fetching direct URL for: {}", url_for_ytdl_fetch);
-        let ytdl_output = Command::new(ytdl_path)
-            .arg("-f").arg(&ytdl_format)
-            .arg("--get-url")
-            .arg("--check-formats")
-            .arg("--get-title")
-            .arg(url_for_ytdl_fetch)
-            .output();
-
-        match ytdl_output {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let lines: Vec<&str> = stdout.trim().lines().collect();
-                if lines.len() >= 2 {
-                    initial_title = lines[0].to_string();
-                    initial_url_to_play = lines[1].to_string();
-                    initial_audio_url = if lines.len() >= 3 { Some(lines[2].to_string()) } else { None };
-                    eprintln!("Extracted Title: {}", initial_title);
-                    eprintln!("Extracted Video URL: {}", initial_url_to_play);
-                    if let Some(ref audio) = initial_audio_url {
-                        eprintln!("Extracted Audio URL: {}", audio);
-                    }
-                } else {
-                    eprintln!("yt-dlp returned insufficient output. Using pre-fetched data as fallback.");
-                }
-            }
-            _ => {
-                eprintln!("Failed to execute yt-dlp or it returned an error. Using pre-fetched data as fallback.");
-            }
-        };
-    }
+    // --- Main Logic ---
 
     if use_existing_socket {
-        // --- Enqueue to existing socket ---
+        // --- Enqueue to Existing Instance ---
+        let items_to_enqueue: Cow<[(String, String)]> = if is_playlist {
+            Cow::Borrowed(&playlist_entries)
+        } else {
+            Cow::Owned(vec![(proto.v_title.clone().unwrap_or(proto.url.clone()), proto.url.clone())]) // Use proto.v_title or URL as title for single video
+        };
+
         if let Some(socket_path) = &config.socket {
             if let Ok(mut stream) = UnixStream::connect(socket_path) {
                 eprintln!("Enqueuing to existing mpv instance.");
-                // When enqueuing, we always fetch the direct URL for the item.
-                let mut command_parts: Vec<serde_json::Value> = vec![
-                    json!("loadfile"),
-                    json!(initial_url_to_play),
-                    json!("append"), // Do not play immediately
-                ];
+                for (index, (initial_title, url)) in items_to_enqueue.iter().enumerate() {
+                    eprintln!("Enqueuing item [{}]: {} - {}", index + 1, initial_title, url);
 
-                let mut options_obj = serde_json::Map::new();
-                options_obj.insert("title".to_string(), json!(initial_title));
+                    let video_url: String;
+                    let audio_url: Option<String>;
+                    let display_title: String;
 
-                if let Some(audio) = initial_audio_url {
-                    options_obj.insert("audio-file".to_string(), json!(audio));
-                }
+                    if is_playlist {
+                        // For playlist items, fetch direct URLs for performance, but use the pre-fetched title
+                        let (fetched_title, fetched_video_url, fetched_audio_url) = fetch_direct_urls(ytdl_path, &ytdl_format, url, initial_title);
+                        video_url = fetched_video_url;
+                        audio_url = fetched_audio_url;
+                        display_title = initial_title.clone(); // Use the title from playlist_entries
+                    } else {
+                        // For single videos, prefetch direct URLs
+                        let (fetched_title, fetched_video_url, fetched_audio_url) = fetch_direct_urls(ytdl_path, &ytdl_format, url, initial_title);
+                        video_url = fetched_video_url;
+                        audio_url = fetched_audio_url;
+                        display_title = fetched_title;
+                    };
 
-                if !options_obj.is_empty() {
-                    command_parts.push(json!(options_obj));
-                }
-
-                let command = json!({ "command": command_parts });
-                let command_str = command.to_string() + "\n";
-                eprintln!("Sending command to mpv: {}", command_str.trim());
-                stream.write_all(command_str.as_bytes())?;
-                println!("Enqueued: {}", initial_title);
-
-                // If it's a playlist, we also pre-fetch and enqueue the rest of the items
-                if is_playlist {
-                    for i in 1..playlist_entries.len() {
-                        let (title, url) = &playlist_entries[i];
-                        eprintln!("Enqueuing subsequent playlist item: {} - {}", title, url);
-
-                        let ytdl_output = Command::new(ytdl_path)
-                            .arg("-f").arg(&ytdl_format)
-                            .arg("--get-url")
-                            .arg("--check-formats")
-                            .arg("--get-title")
-                            .arg(url)
-                            .output();
-
-                        let (video_title, video_url, audio_url) = match ytdl_output {
-                            Ok(output) if output.status.success() => {
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                let lines: Vec<&str> = stdout.trim().lines().collect();
-                                if lines.len() >= 2 {
-                                    (lines[0].to_string(), lines[1].to_string(), lines.get(2).map(|s| s.to_string()))
-                                } else {
-                                    (title.clone(), url.clone(), None)
-                                }
-                            }
-                            _ => (title.clone(), url.clone(), None),
-                        };
-
-                        let mut options_obj = serde_json::Map::new();
-                        options_obj.insert("title".to_string(), json!(video_title));
-                        if let Some(audio) = audio_url {
-                            options_obj.insert("audio-file".to_string(), json!(audio));
-                        }
-
-                        let command = json!({ "command": ["loadfile", video_url, "append", options_obj] });
-                        let command_str = command.to_string() + "\n";
-                        eprintln!("Sending command to mpv: {}", command_str.trim());
-                        stream.write_all(command_str.as_bytes())?;
-                        println!("Enqueued: {} - {}", video_title, url);
+                    let mut options_obj = serde_json::Map::new();
+                    options_obj.insert("title".to_string(), json!(display_title.clone())); // Use display_title for OSC
+                    if let Some(audio) = audio_url {
+                        options_obj.insert("audio-file".to_string(), json!(audio));
                     }
+
+                    let load_command = json!({ "command": ["loadfile", video_url, "append", options_obj] });
+                    let set_playlist_title_command = json!({ "command": ["set_property", "playlist/-1/title", display_title] }); // Use display_title for playlist
+
+                    stream.write_all((load_command.to_string() + "
+").as_bytes())?;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    stream.write_all((set_playlist_title_command.to_string() + "
+").as_bytes())?;
+
+                    println!("Enqueued: {}", display_title); // Print the display title
                 }
-                return Ok(()); // Successfully handled via existing socket
+                return Ok(());
             }
         }
+        // Fallthrough to launch new instance if socket connection fails unexpectedly
     }
 
-    // --- Launch new mpv instance ---
-    let mut options: Vec<String> = Vec::new();
+    // --- Launch New Instance ---
+    let mut options: Vec<String> = build_mpv_options(proto, config);
 
+    if is_playlist {
+        // --- New Instance for Playlist ---
+        options.push("--idle=yes".to_string());
+        if proto.enqueue == Some(true) {
+            if let Some(socket_path) = &config.socket {
+                options.push(format!("--input-ipc-server={}", socket_path));
+            }
+        }
+
+        let mut command = std::process::Command::new(config.mpv.as_deref().unwrap_or("mpv"));
+        command.args(&options);
+        if let Some(proxy) = &config.proxy {
+            command.env("http_proxy", proxy).env("HTTP_PROXY", proxy).env("https_proxy", proxy).env("HTTPS_PROXY", proxy);
+        }
+        #[cfg(unix)]
+        command.env_remove("LD_LIBRARY_PATH").env_remove("LD_PRELOAD");
+
+        match command.spawn() {
+            Ok(mut child) => {
+                handle_playlist_in_new_instance(
+                    &mut child,
+                    config,
+                    &playlist_entries,
+                    ytdl_path,
+                    &ytdl_format,
+                )?;
+                let status = child.wait().map_err(Error::PlayerRunFailed)?;
+                if !status.success() {
+                    return Err(Error::PlayerExited(status.code().unwrap_or(1) as u8));
+                }
+                Ok(())
+            },
+            Err(e) => Err(Error::PlayerRunFailed(e)),
+        }
+    } else {
+        // --- New Instance for Single Video ---
+        if proto.enqueue == Some(true) {
+            if let Some(socket_path) = &config.socket {
+                options.push(format!("--input-ipc-server={}", socket_path));
+            }
+        }
+
+        let mut command = std::process::Command::new(config.mpv.as_deref().unwrap_or("mpv"));
+        command.args(&options);
+        // Pass original URL directly to mpv
+        command.arg("--").arg(&proto.url);
+
+        if let Some(proxy) = &config.proxy {
+            command.env("http_proxy", proxy).env("HTTP_PROXY", proxy).env("https_proxy", proxy).env("HTTPS_PROXY", proxy);
+        }
+        #[cfg(unix)]
+        command.env_remove("LD_LIBRARY_PATH").env_remove("LD_PRELOAD");
+
+        let status = command.status().map_err(Error::PlayerRunFailed)?;
+        if !status.success() {
+            return Err(Error::PlayerExited(status.code().unwrap_or(1) as u8));
+        }
+        Ok(())
+    }
+}
+
+/// Helper to fetch direct URLs and title using yt-dlp
+fn fetch_direct_urls(ytdl_path: &str, ytdl_format: &str, url: &str, default_title: &str) -> (String, String, Option<String>) {
+    eprintln!("Fetching direct URL for: {}", url);
+    let ytdl_output = Command::new(ytdl_path)
+        .arg("-f").arg(ytdl_format)
+        .arg("--get-url")
+        .arg("--check-formats")
+        .arg("--get-title")
+        .arg(url)
+        .output();
+
+    match ytdl_output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.trim().lines().collect();
+            if lines.len() >= 2 {
+                let title = lines[0].to_string();
+                let video_url = lines[1].to_string();
+                let audio_url = if lines.len() >= 3 { Some(lines[2].to_string()) } else { None };
+                eprintln!("Extracted Title: {}", title);
+                eprintln!("Extracted Video URL: {}", video_url);
+                if let Some(ref audio) = audio_url {
+                    eprintln!("Extracted Audio URL: {}", audio);
+                }
+                (title, video_url, audio_url)
+            } else {
+                eprintln!("yt-dlp returned insufficient output. Using original URL as fallback.");
+                (default_title.to_string(), url.to_string(), None)
+            }
+        }
+        _ => {
+            eprintln!("Failed to execute yt-dlp or it returned an error. Using original URL as fallback.");
+            (default_title.to_string(), url.to_string(), None)
+        }
+    }
+}
+
+/// Helper to build the initial mpv command line options
+fn build_mpv_options(proto: &Protocol, config: &Config) -> Vec<String> {
+    let mut options: Vec<String> = Vec::new();
     if let Some(v) = proto.cookies { if let Some(v) = cookies(v) { options.push(v); } }
     if let Some(v) = proto.profile { options.push(profile(v)); }
     if proto.quality.is_some() || proto.v_codec.is_some() { if let Some(v) = formats(proto.quality, proto.v_codec) { options.push(v); } }
@@ -240,103 +323,76 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
     if let Some(v) = &proto.subfile { options.push(subfile(v)); }
     if let Some(v) = &proto.startat { options.push(startat(v)); }
     if let Some(v) = &config.ytdl { options.push(yt_path(v)); }
-
-    if !use_existing_socket && is_playlist {
-        options.push("--idle=yes".to_string());
-    }
-
     if &proto.scheme == &crate::protocol::Schemes::MpvDebug || cfg!(debug_assertions) {
         // ... (debug output remains the same)
     }
+    options
+}
 
-    if proto.enqueue == Some(true) { if let Some(socket_path) = &config.socket { options.push(format!("--input-ipc-server={}", socket_path)); } }
+/// Helper to manage a new mpv instance for a playlist
+fn handle_playlist_in_new_instance(
+    child: &mut std::process::Child,
+    config: &Config,
+    playlist_entries: &[(String, String)],
+    ytdl_path: &str,
+    ytdl_format: &str,
+) -> Result<(), Error> {
+    if let Some(socket_path) = &config.socket {
+        // Wait for the socket to be created
+        let mut stream = None;
+        for i in 0..15 { // Retry connecting for ~3 seconds
+            if let Ok(s) = UnixStream::connect(socket_path) {
+                eprintln!("Connected to new mpv socket after {}ms.", i * 200);
+                stream = Some(s);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
 
-    // Only add audio-file if we have an extracted URL for it.
-    // This won't be the case for the first video in a new playlist instance.
-    if let Some(audio_url) = &initial_audio_url {
-        options.push(format!("--audio-file={}", audio_url));
-    }
+        if let Some(mut s) = stream {
+            // 1. Load the first video (don't pre-extract, let mpv do it)
+            let (first_title, first_url) = &playlist_entries[0];
+            println!("Playing: {}", first_url);
+            let first_cmd = json!({ "command": ["loadfile", first_url, "replace", { "title": first_title }] });
+            s.write_all((first_cmd.to_string() + "
+").as_bytes())?;
 
-    let mut command = std::process::Command::new(config.mpv.as_deref().unwrap_or("mpv"));
-    command.args(&options);
-
-    // Only pass a URL on the command line if we are NOT launching a new playlist instance.
-    if !(!use_existing_socket && is_playlist) {
-        println!("Playing: {}", initial_url_to_play);
-        command.arg("--").arg(&initial_url_to_play);
-    }
-
-    if let Some(proxy) = &config.proxy {
-        command.env("http_proxy", proxy).env("HTTP_PROXY", proxy).env("https_proxy", proxy).env("HTTPS_PROXY", proxy);
-    }
-
-    #[cfg(unix)]
-    command.env_remove("LD_LIBRARY_PATH").env_remove("LD_PRELOAD");
-
-    match command.spawn() {
-        Ok(mut child) => {
-            let mut _stream_guard: Option<UnixStream> = None;
-
-            if !use_existing_socket && is_playlist {
-                if let Some(socket_path) = &config.socket {
-                    let mut stream = None;
-                    for i in 0..15 { // Retry connecting for ~3 seconds
-                        if let Ok(s) = UnixStream::connect(socket_path) {
-                            eprintln!("Connected to mpv socket after {}ms.", i * 200);
-                            stream = Some(s);
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                    }
-
-                    if let Some(mut s) = stream {
-                        // 1. Load the first video
-                        println!("Playing: {}", initial_url_to_play);
-                        let first_cmd = json!({ "command": ["loadfile", initial_url_to_play, "replace", { "title": initial_title }] });
-                        if let Err(e) = s.write_all((first_cmd.to_string() + "\n").as_bytes()) {
-                            eprintln!("Failed to send first command to mpv: {}", e);
-                        } else {
-                            // 2. Enqueue the rest of the items
-                            for i in 1..playlist_entries.len() {
-                                let (title, url) = &playlist_entries[i];
-                                let (video_title, video_url, audio_url) = {
-                                    let ytdl_output = Command::new(ytdl_path).arg("-f").arg(&ytdl_format).arg("--get-url").arg("--check-formats").arg("--get-title").arg(url).output();
-                                    match ytdl_output {
-                                        Ok(output) if output.status.success() => {
-                                            let stdout_str = String::from_utf8_lossy(&output.stdout);
-                                            let lines: Vec<&str> = stdout_str.trim().lines().collect();
-                                            if lines.len() >= 2 { (lines[0].to_string(), lines[1].to_string(), lines.get(2).map(|s| s.to_string())) } else { (title.clone(), url.clone(), None) }
-                                        },
-                                        _ => (title.clone(), url.clone(), None),
-                                    }
-                                };
-                                let mut opts = serde_json::Map::new();
-                                opts.insert("title".to_string(), json!(video_title));
-                                if let Some(audio) = audio_url { opts.insert("audio-file".to_string(), json!(audio)); }
-                                let cmd = json!({ "command": ["loadfile", video_url, "append", opts] });
-                                if let Err(e) = s.write_all((cmd.to_string() + "\n").as_bytes()) {
-                                    eprintln!("Failed to enqueue '{}': {}", title, e);
-                                    break;
-                                }
-                                println!("Enqueued: {}", title);
-                            }
-                        }
-                        // Keep the stream alive until mpv exits
-                        _stream_guard = Some(s);
-                    } else {
-                        return Err(Error::SocketConnectionFailed);
-                    }
+            // 2. Enqueue the rest of the items (pre-extracting for performance)
+            for (title, url) in playlist_entries.iter().skip(1) {
+                let (video_title, video_url, audio_url) = fetch_direct_urls(ytdl_path, ytdl_format, url, title);
+                let mut opts = serde_json::Map::new();
+                opts.insert("title".to_string(), json!(video_title.clone()));
+                if let Some(audio) = audio_url {
+                    opts.insert("audio-file".to_string(), json!(audio));
                 }
+
+                let load_cmd = json!({ "command": ["loadfile", video_url, "append", opts] });
+                let set_playlist_title_cmd = json!({ "command": ["set_property", "playlist/-1/title", video_title] });
+
+                if let Err(e) = s.write_all((load_cmd.to_string() + "
+").as_bytes()) {
+                    eprintln!("Failed to enqueue '{}': {}", title, e);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Err(e) = s.write_all((set_playlist_title_cmd.to_string() + "
+").as_bytes()) {
+                    eprintln!("Failed to set playlist title for '{}': {}", title, e);
+                    break;
+                }
+                println!("Enqueued: {}", title);
             }
-            // Wait for the mpv process to exit. _stream_guard is still in scope.
-            let status = child.wait().map_err(Error::PlayerRunFailed)?;
-            if !status.success() {
-                return Err(Error::PlayerExited(status.code().unwrap_or(1) as u8));
-            }
-            Ok(())
-        },
-        Err(e) => Err(Error::PlayerRunFailed(e)),
+            // Keep the stream alive until mpv exits by not dropping it.
+            // We can't easily wait for the child and hold the stream, so we detach.
+            // This is a simplification; a more robust solution might use threads.
+            std::mem::forget(s);
+        } else {
+            // If we can't connect, kill the idle mpv instance
+            child.kill().ok();
+            return Err(Error::SocketConnectionFailed);
+        }
     }
+    Ok(())
 }
 
 
