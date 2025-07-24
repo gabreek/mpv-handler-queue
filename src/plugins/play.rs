@@ -98,53 +98,52 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
                         .arg("--cancel-label=Play only the first video")
                         .arg("--timeout=10");
 
-                    let confirmation_output = zenity_command.output();
+                    // Spawn the Zenity command first
+                    let mut child = zenity_command.spawn().map_err(|e| {
+                        eprintln!("Failed to spawn Zenity command: {}", e);
+                        Error::PlayerRunFailed(e) // Convert to your custom Error type
+                    })?;
 
-                    // Attempt to make Zenity window always on top using wmctrl
-                    if let Ok(child) = zenity_command.spawn() {
-                        let zenity_pid = child.id();
-                        // Give Zenity a moment to create its window
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        let _ = Command::new("sh")
-                            .arg("-c")
-                            .arg(format!("wmctrl -l -p | grep \"{}\" | awk '{{print $1}}' | xargs -r wmctrl -i -r -b add,above", zenity_pid))
-                            .output();
-                    }
+                    let zenity_pid = child.id();
+                    // Give Zenity a moment to create its window
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = Command::new("sh")
+                        .arg("-c")
+                        .arg(format!("wmctrl -l -p | grep '{}' | awk '{{print $1}}' | xargs -r wmctrl -i -r -b add,above", zenity_pid))
+                        .output();
 
-                    match confirmation_output {
-                        Ok(output) => {
-                            match output.status.code() {
-                                Some(0) => { // OK clicked
-                                    let num_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                                    match num_str.parse::<usize>() {
-                                        Ok(0) => {
-                                            is_playlist = true;
-                                            eprintln!("User chose to fetch all {} playlist items.", total_entries);
-                                        }
-                                        Ok(num) => {
-                                            is_playlist = true;
-                                            playlist_entries.truncate(num);
-                                            eprintln!("User chose to fetch the first {} playlist items.", playlist_entries.len());
-                                        }
-                                        Err(_) => {
-                                            is_playlist = false;
-                                            eprintln!("Invalid input. Treating as a single video.");
-                                        }
-                                    }
-                                }
-                                Some(5) => { // Timeout
+                    // Now wait for the output of the spawned Zenity process
+                    let confirmation_output = child.wait_with_output().map_err(|e| {
+                        eprintln!("Failed to get output from Zenity command: {}", e);
+                        Error::PlayerRunFailed(e) // Convert to your custom Error type
+                    })?;
+
+                    match confirmation_output.status.code() {
+                        Some(0) => { // OK clicked
+                            let num_str = String::from_utf8_lossy(&confirmation_output.stdout).trim().to_string();
+                            match num_str.parse::<usize>() {
+                                Ok(0) => {
                                     is_playlist = true;
-                                    eprintln!("Dialog timed out. Fetching all {} playlist items by default.", total_entries);
+                                    eprintln!("User chose to fetch all {} playlist items.", total_entries);
                                 }
-                                _ => { // Cancelled or other error
+                                Ok(num) => {
+                                    is_playlist = true;
+                                    playlist_entries.truncate(num);
+                                    eprintln!("User chose to fetch the first {} playlist items.", playlist_entries.len());
+                                }
+                                Err(_) => {
                                     is_playlist = false;
-                                    eprintln!("User cancelled or dialog failed. Treating as a single video.");
+                                    eprintln!("Invalid input. Treating as a single video.");
                                 }
                             }
                         }
-                        Err(e) => { // Failed to execute zenity
+                        Some(5) => { // Timeout
+                            is_playlist = true;
+                            eprintln!("Dialog timed out. Fetching all {} playlist items by default.", total_entries);
+                        }
+                        _ => { // Cancelled or other error
                             is_playlist = false;
-                            eprintln!("Zenity command failed: {}. Treating as a single video.", e);
+                            eprintln!("User cancelled or dialog failed. Treating as a single video.");
                         }
                     }
                 }
