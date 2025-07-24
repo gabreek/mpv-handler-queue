@@ -88,62 +88,50 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
                         "Playlist detected with {} entries.\nHow many items do you want to fetch? (0 for all)",
                         total_entries
                     );
-                    let mut zenity_command = Command::new("zenity");
-                    zenity_command
+                    let confirmation_output = Command::new("zenity")
                         .arg("--entry")
                         .arg("--text")
                         .arg(&dialog_text)
                         .arg("--entry-text")
                         .arg("0") // Default value is 0
                         .arg("--cancel-label=Play only the first video")
-                        .arg("--timeout=10");
-
-                    // Spawn the Zenity command first
-                    let mut child = zenity_command.spawn().map_err(|e| {
-                        eprintln!("Failed to spawn Zenity command: {}", e);
-                        Error::PlayerRunFailed(e) // Convert to your custom Error type
-                    })?;
-
-                    let zenity_pid = child.id();
-                    // Give Zenity a moment to create its window
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    let _ = Command::new("sh")
-                        .arg("-c")
-                        .arg(format!("wmctrl -l -p | grep '{}' | awk '{{print $1}}' | xargs -r wmctrl -i -r -b add,above", zenity_pid))
+                        .arg("--timeout=10")
                         .output();
 
-                    // Now wait for the output of the spawned Zenity process
-                    let confirmation_output = child.wait_with_output().map_err(|e| {
-                        eprintln!("Failed to get output from Zenity command: {}", e);
-                        Error::PlayerRunFailed(e) // Convert to your custom Error type
-                    })?;
-
-                    match confirmation_output.status.code() {
-                        Some(0) => { // OK clicked
-                            let num_str = String::from_utf8_lossy(&confirmation_output.stdout).trim().to_string();
-                            match num_str.parse::<usize>() {
-                                Ok(0) => {
-                                    is_playlist = true;
-                                    eprintln!("User chose to fetch all {} playlist items.", total_entries);
+                    match confirmation_output {
+                        Ok(output) => {
+                            match output.status.code() {
+                                Some(0) => { // OK clicked
+                                    let num_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    match num_str.parse::<usize>() {
+                                        Ok(0) => {
+                                            is_playlist = true;
+                                            eprintln!("User chose to fetch all {} playlist items.", total_entries);
+                                        }
+                                        Ok(num) => {
+                                            is_playlist = true;
+                                            playlist_entries.truncate(num);
+                                            eprintln!("User chose to fetch the first {} playlist items.", playlist_entries.len());
+                                        }
+                                        Err(_) => {
+                                            is_playlist = false;
+                                            eprintln!("Invalid input. Treating as a single video.");
+                                        }
+                                    }
                                 }
-                                Ok(num) => {
+                                Some(5) => { // Timeout
                                     is_playlist = true;
-                                    playlist_entries.truncate(num);
-                                    eprintln!("User chose to fetch the first {} playlist items.", playlist_entries.len());
+                                    eprintln!("Dialog timed out. Fetching all {} playlist items by default.", total_entries);
                                 }
-                                Err(_) => {
+                                _ => { // Cancelled or other error
                                     is_playlist = false;
-                                    eprintln!("Invalid input. Treating as a single video.");
+                                    eprintln!("User cancelled or dialog failed. Treating as a single video.");
                                 }
                             }
                         }
-                        Some(5) => { // Timeout
-                            is_playlist = true;
-                            eprintln!("Dialog timed out. Fetching all {} playlist items by default.", total_entries);
-                        }
-                        _ => { // Cancelled or other error
+                        Err(e) => { // Failed to execute zenity
                             is_playlist = false;
-                            eprintln!("User cancelled or dialog failed. Treating as a single video.");
+                            eprintln!("Zenity command failed: {}. Treating as a single video.", e);
                         }
                     }
                 }
@@ -210,11 +198,9 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
                     let load_command = json!({ "command": ["loadfile", video_url, "append", options_obj] });
                     let set_playlist_title_command = json!({ "command": ["set_property", "playlist/-1/title", display_title] }); // Use display_title for playlist
 
-                    stream.write_all((load_command.to_string() + "
-").as_bytes())?;
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    stream.write_all((set_playlist_title_command.to_string() + "
-").as_bytes())?;
+                    stream.write_all((load_command.to_string() + "").as_bytes())?;
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    stream.write_all((set_playlist_title_command.to_string() + "").as_bytes())?;
 
                     println!("Enqueued: {}", display_title); // Print the display title
                 }
