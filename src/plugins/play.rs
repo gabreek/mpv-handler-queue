@@ -198,9 +198,11 @@ pub fn exec(proto: &Protocol, config: &Config) -> Result<(), Error> {
                     let load_command = json!({ "command": ["loadfile", video_url, "append", options_obj] });
                     let set_playlist_title_command = json!({ "command": ["set_property", "playlist/-1/title", display_title] }); // Use display_title for playlist
 
-                    stream.write_all((load_command.to_string() + "").as_bytes())?;
+                    stream.write_all((load_command.to_string() + "
+").as_bytes())?;
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    stream.write_all((set_playlist_title_command.to_string() + "").as_bytes())?;
+                    stream.write_all((set_playlist_title_command.to_string() + "
+").as_bytes())?;
 
                     println!("Enqueued: {}", display_title); // Print the display title
                 }
